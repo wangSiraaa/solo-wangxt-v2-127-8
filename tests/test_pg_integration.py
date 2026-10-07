@@ -96,3 +96,29 @@ def test_idempotent_schema_init(pg_client):
     # creating a second repository over the same DSN must not error on DDL
     arch.repo.init_schema()
     assert c.get("/health").status_code == 200
+
+
+def test_parse_preview_roundtrip(pg_client):
+    c, _ = pg_client
+    r = _post(c, "01_multibyte.eml")
+    assert r.status_code == 201
+    ingest_id = r.json()["ingest_id"]
+
+    p1 = c.post(f"/ingests/{ingest_id}/parse-preview")
+    assert p1.status_code == 201, p1.text
+    p1 = p1.json()
+    assert p1["previewable"] is True
+    assert p1["parser_version"]
+    assert p1["raw_sha256"] == r.json()["raw_sha256"]
+    # same parser as at ingest time -> empty diff in all five categories
+    assert set(p1["diff"]) == {"headers", "bodies", "attachments", "defects", "references"}
+    assert all(p1["diff"][k] == [] for k in p1["diff"])
+
+    # repeated preview is stable; history and single-fetch endpoints work
+    p2 = c.post(f"/ingests/{ingest_id}/parse-preview").json()
+    assert p2["diff_sha256"] == p1["diff_sha256"]
+    assert len(c.get(f"/ingests/{ingest_id}/parse-previews").json()) == 2
+    assert c.get(f"/parse-previews/{p1['id']}").json()["diff_sha256"] == p1["diff_sha256"]
+
+    # the archive itself is untouched
+    assert c.get("/search", params={"q": "GB18030"}).json()["count"] == 1

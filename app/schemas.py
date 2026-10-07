@@ -150,6 +150,25 @@ class IngestDetail(BaseModel):
     message_pk: int | None
 
 
+class ParsePreviewOut(BaseModel):
+    """One parse-comparison preview audit row (see app/preview.py)."""
+
+    id: int
+    ingest_id: int
+    message_pk: int | None
+    created_at: datetime
+    parser_version: str
+    raw_sha256: str | None  # digest of the original bytes read for this preview
+    raw_size: int | None
+    previewable: bool
+    reason: str | None  # why the ingest is not previewable
+    reparsed_status: str | None
+    # differences vs. the archived facts, by category:
+    # headers / bodies / attachments / defects / references
+    diff: dict[str, Any]
+    diff_sha256: str | None
+
+
 class Health(BaseModel):
     status: str
     backend: str

@@ -117,5 +117,23 @@ CREATE TABLE IF NOT EXISTS thread_runs (
     weak_suggestions JSONB NOT NULL DEFAULT '[]'
 );
 
+-- Parse-comparison previews: audit rows for re-parsing a stored raw EML with
+-- the current parser. Previews never write back to the fact tables above.
+CREATE TABLE IF NOT EXISTS parse_previews (
+    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ingest_id       BIGINT NOT NULL REFERENCES ingests(id) ON DELETE CASCADE,
+    message_pk      BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    parser_version  TEXT NOT NULL,
+    raw_sha256      TEXT,               -- digest of the bytes actually read
+    raw_size        BIGINT,
+    previewable     BOOLEAN NOT NULL,
+    reason          TEXT,               -- why the ingest is not previewable
+    reparsed_status TEXT,
+    diff            JSONB NOT NULL DEFAULT '{}',
+    diff_sha256     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_previews_ingest ON parse_previews(ingest_id);
+
 -- Provenance link: raw EML digest -> every ingest/parse result of that bytes.
 CREATE INDEX IF NOT EXISTS idx_ingests_sha ON ingests(raw_sha256);

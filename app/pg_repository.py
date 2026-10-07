@@ -374,6 +374,74 @@ class PgRepository:
             cols = [c.name for c in cur.description]
             return _jsonify(dict(zip(cols, row)))
 
+    # -- parse previews ------------------------------------------------------
+    def get_message_headers(self, message_pk: int) -> list[dict[str, Any]]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ordinal, name, value, raw_value FROM message_headers "
+                "WHERE message_id = %s ORDER BY ordinal",
+                (message_pk,),
+            )
+            cols = [c.name for c in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def get_message_identifiers(self, message_pk: int) -> dict[str, list[str]]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT kind, value FROM message_identifiers "
+                "WHERE message_pk = %s AND kind IN ('references','in_reply_to') ORDER BY ordinal",
+                (message_pk,),
+            )
+            out: dict[str, list[str]] = {"references": [], "in_reply_to": []}
+            for kind, value in cur.fetchall():
+                out[kind].append(value)
+            return out
+
+    def save_parse_preview(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO parse_previews (ingest_id, message_pk, parser_version,
+                    raw_sha256, raw_size, previewable, reason, reparsed_status,
+                    diff, diff_sha256)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id, created_at
+                """,
+                (
+                    record["ingest_id"],
+                    record["message_pk"],
+                    record["parser_version"],
+                    record["raw_sha256"],
+                    record["raw_size"],
+                    record["previewable"],
+                    record["reason"],
+                    record["reparsed_status"],
+                    Jsonb(record["diff"]),
+                    record["diff_sha256"],
+                ),
+            )
+            preview_id, created_at = cur.fetchone()
+            conn.commit()
+        return {"id": preview_id, "created_at": created_at, **record}
+
+    def get_parse_preview(self, preview_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM parse_previews WHERE id = %s", (preview_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [c.name for c in cur.description]
+            return _jsonify(dict(zip(cols, row)))
+
+    def list_parse_previews(self, ingest_id: int, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM parse_previews WHERE ingest_id = %s "
+                "ORDER BY id DESC LIMIT %s OFFSET %s",
+                (ingest_id, limit, offset),
+            )
+            cols = [c.name for c in cur.description]
+            return _jsonify([dict(zip(cols, r)) for r in cur.fetchall()])
+
 
 def _jsonify(value: Any) -> Any:
     """Decode Jsonb values already parsed by psycopg (dicts/lists) — pass through."""

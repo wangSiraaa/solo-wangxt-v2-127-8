@@ -28,9 +28,11 @@ class MemoryRepository:
         self.attachments: list[dict[str, Any]] = []
         self.defects: list[dict[str, Any]] = []
         self.thread_runs: list[dict[str, Any]] = []
+        self.parse_previews: dict[int, dict[str, Any]] = {}
         self._ingest_seq = 0
         self._msg_seq = 0
         self._att_seq = 0
+        self._preview_seq = 0
 
     def init_schema(self) -> None:  # nothing to do
         return None
@@ -326,3 +328,35 @@ class MemoryRepository:
             if a["id"] == attachment_id:
                 return dict(a)
         return None
+
+    # -- parse previews ------------------------------------------------------
+    def get_message_headers(self, message_pk: int) -> list[dict[str, Any]]:
+        rows = [h for h in self.headers if h["message_id"] == message_pk]
+        return [dict(h) for h in sorted(rows, key=lambda h: h["ordinal"])]
+
+    def get_message_identifiers(self, message_pk: int) -> dict[str, list[str]]:
+        rows = [i for i in self.identifiers if i["message_pk"] == message_pk]
+        rows.sort(key=lambda i: i["ordinal"])
+        return {
+            "references": [i["value"] for i in rows if i["kind"] == "references"],
+            "in_reply_to": [i["value"] for i in rows if i["kind"] == "in_reply_to"],
+        }
+
+    def save_parse_preview(self, record: dict[str, Any]) -> dict[str, Any]:
+        self._preview_seq += 1
+        row = {
+            "id": self._preview_seq,
+            "created_at": datetime.now(timezone.utc),
+            **record,
+        }
+        self.parse_previews[row["id"]] = row
+        return dict(row)
+
+    def get_parse_preview(self, preview_id: int) -> dict[str, Any] | None:
+        row = self.parse_previews.get(preview_id)
+        return dict(row) if row else None
+
+    def list_parse_previews(self, ingest_id: int, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        rows = [p for p in self.parse_previews.values() if p["ingest_id"] == ingest_id]
+        rows.sort(key=lambda p: p["id"], reverse=True)
+        return [dict(p) for p in rows[offset : offset + limit]]

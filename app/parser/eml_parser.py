@@ -36,6 +36,10 @@ _BARE_MSGID_RE = re.compile(r"([A-Za-z0-9_.+\-]+@[A-Za-z0-9_.\-]+)")
 # superset of GBK/GB2312 and covers most Chinese mail in the wild.
 FALLBACK_CHARSETS = ("utf-8", "gb18030", "big5", "shift_jis", "iso-8859-1")
 
+# Bumped whenever parsing / charset / sanitization behavior changes, so parse
+# previews (app/preview.py) can record which parser produced a given diff.
+PARSER_VERSION = "eml-parser/1.0.0"
+
 
 class ParseFailure(Exception):
     """Raised only when even a partial structure cannot be produced."""

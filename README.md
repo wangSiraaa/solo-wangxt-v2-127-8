@@ -61,7 +61,32 @@ Implemented in `app/threads.py` (pure function, unit tested):
 | POST | `/threads/rebuild` | recompute all threads; returns conflicts/cycles/dangling/weak hints |
 | GET | `/ingests/{id}` | provenance: raw digest/path + every defect located by stage |
 | GET | `/failures` | failed/defective ingests with their defect lists |
+| POST | `/ingests/{id}/parse-preview` | re-parse the stored raw EML with the **current** parser and record the diff vs. the archived facts (read-only for the archive) |
+| GET | `/ingests/{id}/parse-previews` / `/parse-previews/{id}` | preview history / one preview record (parser version, raw digest, diff, stability hash) |
 | GET | `/health` | backend and configured storage roots |
+
+## Parse-comparison previews
+
+After a parser upgrade, an archivist can ask how an old mail *would* be read
+today without touching the archive. `POST /ingests/{id}/parse-preview` reads
+the stored raw EML bytes, re-parses them with the current parser and diffs the
+result against the facts archived at ingest time, reported in five categories:
+**headers, bodies, attachments, defects, thread references**
+(`message_id` / `references` / `in_reply_to`).
+
+* **Not a re-ingest**: nothing is written to the message/header/body/
+  attachment/defect tables, no files are stored, threads are never
+  recomputed. Ingest ids, download paths and thread assignments are
+  untouched. The only writes are audit rows in `parse_previews`.
+* **Auditable**: every preview records the parser version
+  (`app/parser/eml_parser.py::PARSER_VERSION`), the sha256/size of the
+  original bytes actually read, and a `diff_sha256` over the canonical diff.
+  Re-previewing the same original with the same parser yields an identical
+  diff and digest.
+* **Honest about gaps**: if the raw EML was never stored (failed ingest), is
+  missing on disk, has a tampered path, or its bytes no longer match the
+  archived digest, the record is marked `previewable: false` with a `reason`;
+  the archived metadata stays available.
 
 ## Running
 
@@ -91,7 +116,7 @@ ls samples/
 ### Tests
 
 ```bash
-.venv/bin/python -m pytest                       # 47 unit + API tests (memory backend)
+.venv/bin/python -m pytest                       # 56 unit + API tests (memory backend)
 EMLARCH_RUN_PG_TESTS=1 EMLARCH_TEST_DSN='postgresql://postgres@/postgres?host=/tmp/pgsock&port=55432' \
   .venv/bin/python -m pytest                     # + real PostgreSQL integration tests
 ```
@@ -114,6 +139,7 @@ app/
     models.py          structured result dataclasses
   storage.py           ControlledStorage (path safety, 0600, metadata logs)
   threads.py           Message-ID graph + cycles + conflicts + weak subjects
+  preview.py           parse-comparison previews (re-parse raw EML, diff, audit)
   pg_repository.py     PostgreSQL persistence (psycopg3)
   memory_repository.py same interface, in-memory (tests / demo)
   service.py           parse -> store -> persist -> thread orchestration

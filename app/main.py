@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, Response
 from app.config import Settings, get_settings
 from app.memory_repository import MemoryRepository
 from app.pg_repository import PgRepository
+from app.preview import PreviewService
 from app.repository import Repository
 from app.schemas import (
     FailureOut,
@@ -22,6 +23,7 @@ from app.schemas import (
     IngestResponse,
     MessageDetail,
     MessageSummary,
+    ParsePreviewOut,
     SearchResponse,
     ThreadDetail,
     ThreadSummary,
@@ -47,6 +49,7 @@ class AppState:
             self.backend = "memory"
         self.repo.init_schema()
         self.service = IngestService(self.repo, self.raw_storage, self.attachment_storage)
+        self.preview_service = PreviewService(self.repo, self.raw_storage)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -161,6 +164,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         offset: int = Query(0, ge=0),
     ) -> list[dict[str, Any]]:
         return get_state(request).repo.list_failures(limit, offset)
+
+    # ---- parse previews ----------------------------------------------------
+    @app.post(
+        "/ingests/{ingest_id}/parse-preview",
+        response_model=ParsePreviewOut,
+        status_code=201,
+        tags=["preview"],
+    )
+    def create_parse_preview(request: Request, ingest_id: int) -> dict[str, Any]:
+        """Re-parse the stored raw EML with the current parser and diff it
+        against the archived facts. Read-only for the archive: ingest ids,
+        download paths and thread assignments are never touched."""
+        record = get_state(request).preview_service.create_preview(ingest_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="ingest not found")
+        return record
+
+    @app.get(
+        "/ingests/{ingest_id}/parse-previews",
+        response_model=list[ParsePreviewOut],
+        tags=["preview"],
+    )
+    def list_parse_previews(
+        request: Request,
+        ingest_id: int,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> list[dict[str, Any]]:
+        st = get_state(request)
+        if st.repo.get_ingest(ingest_id) is None:
+            raise HTTPException(status_code=404, detail="ingest not found")
+        return st.repo.list_parse_previews(ingest_id, limit, offset)
+
+    @app.get("/parse-previews/{preview_id}", response_model=ParsePreviewOut, tags=["preview"])
+    def get_parse_preview(request: Request, preview_id: int) -> dict[str, Any]:
+        record = get_state(request).repo.get_parse_preview(preview_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="preview not found")
+        return record
 
     # ---- threads ---------------------------------------------------------
     @app.get("/threads", response_model=list[ThreadSummary], tags=["threads"])
