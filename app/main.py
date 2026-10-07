@@ -22,10 +22,12 @@ from app.schemas import (
     IngestResponse,
     MessageDetail,
     MessageSummary,
+    ReparsePreviewOut,
     SearchResponse,
     ThreadDetail,
     ThreadSummary,
 )
+from app.preview import PreviewError, ReparsePreviewService
 from app.service import IngestService
 from app.storage import ControlledStorage, StorageError
 
@@ -47,6 +49,8 @@ class AppState:
             self.backend = "memory"
         self.repo.init_schema()
         self.service = IngestService(self.repo, self.raw_storage, self.attachment_storage)
+        # Previews only read saved bytes and stored facts; they never ingest.
+        self.preview_service = ReparsePreviewService(self.repo, self.raw_storage)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -145,6 +149,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
         return get_state(request).repo.search_messages(q, limit, offset)
+
+    # ---- reparse comparison previews (never a re-ingest) ----------------
+    @app.post(
+        "/messages/{pk}/reparse-preview",
+        response_model=ReparsePreviewOut,
+        status_code=200,
+        tags=["reparse-previews"],
+    )
+    def create_reparse_preview(request: Request, pk: int) -> dict[str, Any]:
+        """Re-parse the SAVED original EML with the current parser and diff it
+        against the archived facts. Creates no ingest, writes no bytes, does
+        not change attachment paths or thread assignments."""
+        try:
+            return get_state(request).preview_service.preview_message(pk)
+        except PreviewError:
+            raise HTTPException(status_code=404, detail="message not found")
+
+    @app.get(
+        "/reparse-previews",
+        response_model=list[ReparsePreviewOut],
+        tags=["reparse-previews"],
+    )
+    def list_reparse_previews(
+        request: Request,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return get_state(request).preview_service.list_previews(limit, offset)
+
+    @app.get(
+        "/messages/{pk}/reparse-preview",
+        response_model=ReparsePreviewOut,
+        tags=["reparse-previews"],
+    )
+    def get_latest_reparse_preview(request: Request, pk: int) -> dict[str, Any]:
+        preview = get_state(request).preview_service.get_latest_for_message(pk)
+        if preview is None:
+            raise HTTPException(status_code=404, detail="no reparse preview exists for this message")
+        return preview
+
+    @app.get(
+        "/reparse-previews/{preview_id}",
+        response_model=ReparsePreviewOut,
+        tags=["reparse-previews"],
+    )
+    def get_reparse_preview(request: Request, preview_id: int) -> dict[str, Any]:
+        preview = get_state(request).preview_service.get_preview(preview_id)
+        if preview is None:
+            raise HTTPException(status_code=404, detail="reparse preview not found")
+        return preview
 
     # ---- ingests / failures ---------------------------------------------
     @app.get("/ingests/{ingest_id}", response_model=IngestDetail, tags=["ingest"])

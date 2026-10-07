@@ -96,3 +96,52 @@ def test_idempotent_schema_init(pg_client):
     # creating a second repository over the same DSN must not error on DDL
     arch.repo.init_schema()
     assert c.get("/health").status_code == 200
+
+
+def test_reparse_preview_pg_idempotent_and_read_only(pg_client):
+    c, arch = pg_client
+    r = _post(c, "01_multibyte.eml")
+    pk = r.json()["message_pk"]
+    ingest_id = r.json()["ingest_id"]
+    msg_before = c.get(f"/messages/{pk}").json()
+    ing_before = c.get(f"/ingests/{ingest_id}").json()
+    assert ing_before.get("parser_version")
+
+    p1 = c.post(f"/messages/{pk}/reparse-preview")
+    assert p1.status_code == 200, p1.text
+    j1 = p1.json()
+    assert j1["status"] == "previewable"
+    assert j1["diff"]["identical"] is True
+    assert j1["raw"]["digest_matches"] is True
+    j2 = c.post(f"/messages/{pk}/reparse-preview").json()
+    # stable identity and diff for the same (original, parser version)
+    assert j2["id"] == j1["id"]
+    assert j2["created_at"] == j1["created_at"]
+    assert j2["diff"] == j1["diff"]
+
+    # read-only: no new messages/ingests; paths and threads untouched
+    assert c.get(f"/messages/{pk}").json()["raw_path"] == msg_before["raw_path"]
+    assert c.get("/messages").json() and len(c.get("/messages").json()) == 1
+    assert c.get(f"/ingests/{ingest_id}").json()["raw_sha256"] == ing_before["raw_sha256"]
+
+    # query interfaces
+    listed = c.get("/reparse-previews").json()
+    assert len(listed) == 1 and listed[0]["id"] == j1["id"]
+    assert c.get(f"/messages/{pk}/reparse-preview").json()["id"] == j1["id"]
+
+
+def test_reparse_preview_pg_raw_missing(pg_client):
+    c, arch = pg_client
+    r = _post(c, "01_multibyte.eml")
+    pk = r.json()["message_pk"]
+    raw_path = c.get(f"/messages/{pk}").json()["raw_path"]
+    arch.raw_storage.resolve(raw_path).unlink()
+
+    pv = c.post(f"/messages/{pk}/reparse-preview").json()
+    assert pv["status"] == "raw_missing"
+    assert pv["diff"] is None
+    assert pv["raw"]["archived_sha256"] == r.json()["raw_sha256"]
+    # archived metadata still present and searchable
+    assert c.get("/search", params={"q": "multi-01"}).json()["count"] == 1
+    # stable row across repeated attempts
+    assert c.post(f"/messages/{pk}/reparse-preview").json()["id"] == pv["id"]

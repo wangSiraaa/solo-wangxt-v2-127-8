@@ -36,6 +36,12 @@ _BARE_MSGID_RE = re.compile(r"([A-Za-z0-9_.+\-]+@[A-Za-z0-9_.\-]+)")
 # superset of GBK/GB2312 and covers most Chinese mail in the wild.
 FALLBACK_CHARSETS = ("utf-8", "gb18030", "big5", "shift_jis", "iso-8859-1")
 
+# Identity of the parsing behavior in this module. Bump whenever parsing rules
+# change (structure walk, charset ladder, header/address handling, sanitizer
+# policy): ingests record the version that produced their stored facts and
+# reparse previews record the version that produced the comparison.
+PARSER_VERSION = "1.1.0"
+
 
 class ParseFailure(Exception):
     """Raised only when even a partial structure cannot be produced."""

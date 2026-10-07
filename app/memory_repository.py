@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
+from app.parser import PARSER_VERSION
 from app.parser.html_sanitizer import escape_html
 from app.parser.models import ParsedMessage
 from app.threads import ThreadInput, compute_threads
@@ -28,9 +29,11 @@ class MemoryRepository:
         self.attachments: list[dict[str, Any]] = []
         self.defects: list[dict[str, Any]] = []
         self.thread_runs: list[dict[str, Any]] = []
+        self.reparse_previews: list[dict[str, Any]] = []
         self._ingest_seq = 0
         self._msg_seq = 0
         self._att_seq = 0
+        self._preview_seq = 0
 
     def init_schema(self) -> None:  # nothing to do
         return None
@@ -57,6 +60,7 @@ class MemoryRepository:
             "raw_path": raw_relpath,
             "fatal_error": fatal_error,
             "defect_count": len(parsed.defects),
+            "parser_version": PARSER_VERSION,
         }
         message_pk: int | None = None
         if status != "failed":
@@ -326,3 +330,119 @@ class MemoryRepository:
             if a["id"] == attachment_id:
                 return dict(a)
         return None
+
+    # -- reparse previews --------------------------------------------------
+    def get_message_snapshot(self, pk: int) -> dict[str, Any] | None:
+        m = self.messages.get(pk)
+        if not m:
+            return None
+        ingest = self.ingests.get(m["ingest_id"], {})
+        return {
+            "id": pk,
+            "ingest_id": m["ingest_id"],
+            "message_id": m["message_id"],
+            "subject": m["subject"],
+            "date": m["date"],
+            "thread_key": m["thread_key"],
+            "raw_sha256": m["raw_sha256"],
+            "raw_size": ingest.get("raw_size"),
+            "raw_path": ingest.get("raw_path") or m.get("raw_path"),
+            "parser_version": ingest.get("parser_version"),
+            "headers": [
+                {"ordinal": h["ordinal"], "name": h["name"], "value": h["value"],
+                 "raw_value": h["raw_value"]}
+                for h in self.headers
+                if h["message_id"] == pk
+            ],
+            "identifiers": [
+                {"kind": i["kind"], "value": i["value"], "ordinal": i["ordinal"]}
+                for i in self.identifiers
+                if i["message_pk"] == pk
+            ],
+            "bodies": [dict(b) for b in self.bodies if b["message_pk"] == pk],
+            "attachments": [dict(a) for a in self.attachments if a["message_pk"] == pk],
+            "defects": [
+                {"stage": d["stage"], "level": d["level"], "message": d["message"]}
+                for d in self.defects
+                if d["message_pk"] == pk
+            ],
+        }
+
+    def thread_inputs(self) -> list[dict[str, Any]]:
+        rows = []
+        for pk, m in self.messages.items():
+            refs = [i["value"] for i in self.identifiers
+                    if i["message_pk"] == pk and i["kind"] == "references"]
+            irt = [i["value"] for i in self.identifiers
+                   if i["message_pk"] == pk and i["kind"] == "in_reply_to"]
+            rows.append({
+                "id": pk,
+                "message_id": m["message_id"],
+                "subject": m["subject"],
+                "date": m["date"],
+                "thread_key": m["thread_key"],
+                "references": refs,
+                "in_reply_to": irt,
+            })
+        rows.sort(key=lambda r: r["id"])
+        return rows
+
+    @staticmethod
+    def _preview_out(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "message_pk": row["message_pk"],
+            "ingest_id": row["ingest_id"],
+            "status": row["status"],
+            "parser_version": row["parser_version"],
+            "archived_parser_version": row["archived_parser_version"],
+            "raw": row["raw_summary"],
+            "diff": row["diff"],
+        }
+
+    def save_reparse_preview(self, record: dict[str, Any]) -> dict[str, Any]:
+        # Idempotent on (message_pk, archived raw digest, parser version).
+        for row in self.reparse_previews:
+            if (
+                row["message_pk"] == record["message_pk"]
+                and row["raw_sha256"] == record["raw_sha256"]
+                and row["parser_version"] == record["parser_version"]
+            ):
+                # Same original re-previewed: keep stable id/created_at, but
+                # refresh content (e.g. the raw file was missing and was later
+                # restored, or was found corrupted at disk level).
+                row["status"] = record["status"]
+                row["archived_parser_version"] = record["archived_parser_version"]
+                row["raw_summary"] = record["raw"]
+                row["diff"] = record["diff"]
+                return self._preview_out(row)
+        self._preview_seq += 1
+        row = {
+            "id": self._preview_seq,
+            "created_at": datetime.now(timezone.utc),
+            "message_pk": record["message_pk"],
+            "ingest_id": record["ingest_id"],
+            "status": record["status"],
+            "parser_version": record["parser_version"],
+            "archived_parser_version": record["archived_parser_version"],
+            "raw_sha256": record["raw_sha256"],
+            "raw_summary": record["raw"],
+            "diff": record["diff"],
+        }
+        self.reparse_previews.append(row)
+        return self._preview_out(row)
+
+    def get_reparse_preview(self, preview_id: int) -> dict[str, Any] | None:
+        for row in self.reparse_previews:
+            if row["id"] == preview_id:
+                return self._preview_out(row)
+        return None
+
+    def get_latest_reparse_preview(self, message_pk: int) -> dict[str, Any] | None:
+        matches = [r for r in self.reparse_previews if r["message_pk"] == message_pk]
+        return self._preview_out(matches[-1]) if matches else None
+
+    def list_reparse_previews(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        ordered = sorted(self.reparse_previews, key=lambda r: r["id"], reverse=True)
+        return [self._preview_out(r) for r in ordered[offset : offset + limit]]

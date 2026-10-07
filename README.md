@@ -31,8 +31,37 @@ There is **no frontend** — JSON HTTP API only.
   dates, malformed Message-IDs, bad CTEs are collected per stage rather than
   raised. Results are `ok` / `defective` / `failed`; even `failed` uploads get
   an ingest row with the raw digest and defects.
-* **Provenance**: each ingest stores the raw EML sha256, size, on-disk path
-  and the parsed result references the same digest.
+* **Provenance**: each ingest stores the raw EML sha256, size, on-disk path,
+  the parsed result references the same digest, and both record the
+  `PARSER_VERSION` (`app/parser/eml_parser.py`) that produced the facts.
+
+## Reparse comparison previews
+
+After a parser upgrade the archivist can see how an *old* message would be
+re-interpreted **without re-ingesting it**. Implemented in `app/preview.py`:
+
+* `POST /messages/{id}/reparse-preview` reads the **saved original bytes** from
+  controlled raw storage, runs the *current* parser, and diffs the fresh result
+  against the archived facts in five sections: **headers, bodies, attachments,
+  defects, thread references**.
+* Each preview records the **current parser version**, the **archived parser
+  version**, and an **original-text summary** (archived/on-disk sha256 + size,
+  digest match, availability).
+* It is **not** an ingest: no ingest/message rows are created, no attachment is
+  written, stored download paths are unchanged, and no `thread_key` is
+  reassigned. The thread section only *projects* the merge/split the fresh
+  `Message-ID`/`References`/`In-Reply-To` tokens would cause (membership diff
+  against the archived thread).
+* **Stable**: previews are idempotent on
+  `(message, archived raw sha256, parser version)` — repeating a preview for
+  the same original returns the same row (same id/created-at) and a byte-stable
+  diff.
+* When the saved original is missing, the preview is marked `raw_missing` with
+  `diff = null` and a reason; the old metadata (digest, size, path, facts)
+  remains fully in place and searchable. Restoring the bytes recovers the
+  preview on the same row.
+* Query via `GET /messages/{id}/reparse-preview` (latest),
+  `GET /reparse-previews` (list), `GET /reparse-previews/{id}`.
 
 ## Threading / conversations
 
@@ -56,6 +85,9 @@ Implemented in `app/threads.py` (pure function, unit tested):
 | POST | `/ingest` | multipart upload of one `.eml`; returns status, digest, parts, attachments, threading report |
 | GET | `/messages` / `/messages/{id}` | list / full detail (tree, bodies, attachments, defects) |
 | GET | `/messages/{id}/attachments/{aid}/download` | stream attachment bytes (path re-validated) |
+| POST | `/messages/{id}/reparse-preview` | re-parse the saved original with the current parser and diff vs. archive (read-only, not an ingest) |
+| GET | `/messages/{id}/reparse-preview` | latest preview for one message |
+| GET | `/reparse-previews` / `/reparse-previews/{id}` | list / fetch stored previews |
 | GET | `/search?q=` | substring over subject, Message-ID, all header values, body plain text |
 | GET | `/threads` / `/threads/{key}` | thread summaries / ordered members with reference headers |
 | POST | `/threads/rebuild` | recompute all threads; returns conflicts/cycles/dangling/weak hints |
@@ -91,7 +123,7 @@ ls samples/
 ### Tests
 
 ```bash
-.venv/bin/python -m pytest                       # 47 unit + API tests (memory backend)
+.venv/bin/python -m pytest                       # 73 unit + API tests (memory backend)
 EMLARCH_RUN_PG_TESTS=1 EMLARCH_TEST_DSN='postgresql://postgres@/postgres?host=/tmp/pgsock&port=55432' \
   .venv/bin/python -m pytest                     # + real PostgreSQL integration tests
 ```
@@ -114,6 +146,7 @@ app/
     models.py          structured result dataclasses
   storage.py           ControlledStorage (path safety, 0600, metadata logs)
   threads.py           Message-ID graph + cycles + conflicts + weak subjects
+  preview.py           reparse-comparison previews (five-section diff, read-only)
   pg_repository.py     PostgreSQL persistence (psycopg3)
   memory_repository.py same interface, in-memory (tests / demo)
   service.py           parse -> store -> persist -> thread orchestration

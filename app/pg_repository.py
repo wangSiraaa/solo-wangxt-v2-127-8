@@ -9,6 +9,7 @@ from typing import Any, Sequence
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.parser import PARSER_VERSION
 from app.parser.html_sanitizer import escape_html
 from app.parser.models import ParsedMessage
 from app.threads import ThreadInput, compute_threads
@@ -59,8 +60,8 @@ class PgRepository:
             cur.execute(
                 """
                 INSERT INTO ingests (source_name, status, raw_sha256, raw_size, raw_path,
-                                     fatal_error, defect_count)
-                VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                                     fatal_error, defect_count, parser_version)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
                 """,
                 (
                     source_name,
@@ -70,6 +71,7 @@ class PgRepository:
                     raw_relpath,
                     fatal_error,
                     len(parsed.defects),
+                    PARSER_VERSION,
                 ),
             )
             ingest_id = cur.fetchone()[0]
@@ -373,6 +375,160 @@ class PgRepository:
                 return None
             cols = [c.name for c in cur.description]
             return _jsonify(dict(zip(cols, row)))
+
+    # -- reparse previews (read-only comparison; never a re-ingest) --------
+    def get_message_snapshot(self, pk: int) -> dict[str, Any] | None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.ingest_id, m.message_id, m.subject, m.date, m.thread_key,
+                       m.raw_sha256 AS raw_sha256, i.raw_size,
+                       COALESCE(i.raw_path, m.raw_path) AS raw_path, i.parser_version
+                FROM messages m JOIN ingests i ON i.id = m.ingest_id
+                WHERE m.id = %s
+                """,
+                (pk,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [c.name for c in cur.description]
+            snapshot = dict(zip(cols, row))
+
+            cur.execute(
+                "SELECT ordinal, name, value, raw_value FROM message_headers "
+                "WHERE message_id = %s ORDER BY ordinal",
+                (pk,),
+            )
+            snapshot["headers"] = [
+                dict(zip(["ordinal", "name", "value", "raw_value"], r)) for r in cur.fetchall()
+            ]
+            cur.execute(
+                "SELECT kind, value, ordinal FROM message_identifiers WHERE message_pk = %s ORDER BY ordinal",
+                (pk,),
+            )
+            snapshot["identifiers"] = [
+                dict(zip(["kind", "value", "ordinal"], r)) for r in cur.fetchall()
+            ]
+            for table, key in (("bodies", "bodies"), ("attachments", "attachments")):
+                cur.execute(f"SELECT * FROM {table} WHERE message_pk = %s ORDER BY id", (pk,))
+                c = [x.name for x in cur.description]
+                snapshot[key] = [dict(zip(c, r)) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT stage, level, message FROM defects WHERE message_pk = %s ORDER BY id",
+                (pk,),
+            )
+            snapshot["defects"] = [
+                dict(zip(["stage", "level", "message"], r)) for r in cur.fetchall()
+            ]
+            return _jsonify(snapshot)
+
+    def thread_inputs(self) -> list[dict[str, Any]]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.message_id, m.subject, m.date, m.thread_key,
+                       (SELECT jsonb_agg(value ORDER BY ordinal) FILTER (WHERE kind='references')
+                          FROM message_identifiers i WHERE i.message_pk = m.id) AS refs,
+                       (SELECT jsonb_agg(value ORDER BY ordinal) FILTER (WHERE kind='in_reply_to')
+                          FROM message_identifiers i WHERE i.message_pk = m.id) AS irt
+                FROM messages m ORDER BY m.id
+                """
+            )
+            cols = [c.name for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        return _jsonify([
+            {
+                "id": r["id"],
+                "message_id": r["message_id"],
+                "subject": r["subject"],
+                "date": r["date"],
+                "thread_key": r["thread_key"],
+                "references": list(r["refs"] or []),
+                "in_reply_to": list(r["irt"] or []),
+            }
+            for r in rows
+        ])
+
+    @staticmethod
+    def _preview_out(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "message_pk": row["message_pk"],
+            "ingest_id": row["ingest_id"],
+            "status": row["status"],
+            "parser_version": row["parser_version"],
+            "archived_parser_version": row["archived_parser_version"],
+            "raw": row["raw_summary"],
+            "diff": row["diff"],
+        }
+
+    def save_reparse_preview(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reparse_previews
+                    (message_pk, ingest_id, status, parser_version,
+                     archived_parser_version, raw_sha256, raw_summary, diff)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (message_pk, raw_sha256, parser_version) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    archived_parser_version = EXCLUDED.archived_parser_version,
+                    raw_summary = EXCLUDED.raw_summary,
+                    diff = EXCLUDED.diff
+                    -- created_at intentionally preserved: the first preview of
+                    -- this original/version pair defines the stable identity.
+                RETURNING id
+                """,
+                (
+                    record["message_pk"],
+                    record["ingest_id"],
+                    record["status"],
+                    record["parser_version"],
+                    record["archived_parser_version"],
+                    record["raw_sha256"],
+                    Jsonb(record["raw"]),
+                    Jsonb(record["diff"]),
+                ),
+            )
+            preview_id = cur.fetchone()[0]
+            conn.commit()
+        out = self.get_reparse_preview(preview_id)
+        assert out is not None
+        return out
+
+    def get_reparse_preview(self, preview_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM reparse_previews WHERE id = %s", (preview_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [c.name for c in cur.description]
+            return self._preview_out(_jsonify(dict(zip(cols, row))))
+
+    def get_latest_reparse_preview(self, message_pk: int) -> dict[str, Any] | None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM reparse_previews WHERE message_pk = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (message_pk,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [c.name for c in cur.description]
+            return self._preview_out(_jsonify(dict(zip(cols, row))))
+
+    def list_reparse_previews(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM reparse_previews ORDER BY id DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            cols = [c.name for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        return [self._preview_out(r) for r in _jsonify(rows)]
 
 
 def _jsonify(value: Any) -> Any:

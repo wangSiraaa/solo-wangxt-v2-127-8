@@ -1,4 +1,4 @@
-from .eml_parser import ParseFailure, parse_eml
+from .eml_parser import PARSER_VERSION, ParseFailure, parse_eml
 from .html_sanitizer import escape_html, sanitize_html, strip_to_text
 from .models import (
     Address,
@@ -13,6 +13,7 @@ from .models import (
 
 __all__ = [
     "parse_eml",
+    "PARSER_VERSION",
     "ParseFailure",
     "sanitize_html",
     "escape_html",

@@ -148,6 +148,34 @@ class IngestDetail(BaseModel):
     defect_count: int
     defects: list[DefectOut]
     message_pk: int | None
+    parser_version: str | None = None
+
+
+# ---- reparse comparison previews -----------------------------------------
+
+class PreviewRawSummary(BaseModel):
+    archived_sha256: str | None
+    archived_size: int | None
+    current_sha256: str | None
+    current_size: int | None
+    digest_matches: bool
+    path: str | None
+    available: bool
+    reason: str | None = None
+
+
+class ReparsePreviewOut(BaseModel):
+    id: int
+    created_at: datetime
+    message_pk: int
+    ingest_id: int
+    status: str  # previewable | raw_missing | parse_failed
+    parser_version: str
+    archived_parser_version: str | None
+    raw: PreviewRawSummary
+    # Five-section diff (headers/bodies/attachments/defects/thread_references);
+    # None when the saved original is unavailable and no parse could run.
+    diff: dict[str, Any] | None = None
 
 
 class Health(BaseModel):
